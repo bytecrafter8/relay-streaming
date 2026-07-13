@@ -70,7 +70,7 @@ wss.on('connection', ws => {
       for (const viewer of session.viewers.values()) { send(viewer, { type: 'session-closed' }); viewer.sessionId = viewer.role = viewer.peerId = null; }
       send(ws, { type: 'session-closed' }); ws.sessionId = ws.role = null; sessions.delete(m.sessionId); return;
     }
-    if (['offer','answer','ice','network-mode'].includes(m.type) && ws.sessionId) relay(ws, m);
+    if (['offer','answer','ice','network-mode','talkback-offer','talkback-answer','talkback-ice'].includes(m.type) && ws.sessionId) relay(ws, m);
   });
   ws.on('close', () => detach(ws)); ws.on('error', () => detach(ws));
 });
