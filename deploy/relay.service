@@ -7,11 +7,11 @@ Wants=network-online.target
 Type=simple
 User=relay
 Group=relay
-WorkingDirectory=/opt/relay/backend
+WorkingDirectory=/opt/relay
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=8787
-ExecStart=/usr/bin/node /opt/relay/backend/index.js
+ExecStart=/usr/bin/node /opt/relay/index.js
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
