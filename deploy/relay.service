@@ -1,16 +1,14 @@
 [Unit]
 Description=Relay WebSocket signaling service
-After=network-online.target
-Wants=network-online.target
+After=network-online.target coturn.service
+Wants=network-online.target coturn.service
 
 [Service]
 Type=simple
 User=relay
 Group=relay
 WorkingDirectory=/opt/relay
-Environment=NODE_ENV=production
-Environment=HOST=127.0.0.1
-Environment=PORT=8787
+EnvironmentFile=/etc/relay/relay.env
 ExecStart=/usr/bin/node /opt/relay/index.js
 Restart=always
 RestartSec=3

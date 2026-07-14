@@ -1,20 +1,34 @@
 const http = require('http');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const { createIceConfig, loadTurnConfig, shouldRefreshIceConfig } = require('./turn');
 
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || '127.0.0.1';
+const turnConfig = loadTurnConfig();
 const sessions = new Map();
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
-  res.end(JSON.stringify({ service: 'relay-signaling', ok: true, sessions: sessions.size }));
+  res.end(JSON.stringify({ service: 'relay-signaling', ok: true, sessions: sessions.size, turnConfigured: turnConfig.configured }));
 });
 const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 });
 const send = (ws, message) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); };
 const validId = value => /^\d{9}$/.test(String(value || ''));
+const iceMessage = iceConfig => ({ type: 'ice-servers', ...iceConfig });
+
+function getIceConfig(ws, forceRefresh = false) {
+  if (forceRefresh || !ws.iceConfig || shouldRefreshIceConfig(ws.iceConfig, turnConfig)) ws.iceConfig = createIceConfig(turnConfig);
+  return ws.iceConfig;
+}
+
+function pushIceServers(ws, forceRefresh = false) {
+  const config = getIceConfig(ws, forceRefresh);
+  send(ws, iceMessage(config));
+  return config;
+}
 
 function detach(ws) {
-  if (!ws.sessionId) return;
+  if (!ws.sessionId) { ws.iceConfig = null; return; }
   const session = sessions.get(ws.sessionId);
   if (session) {
     if (ws.role === 'host' && session.host === ws) {
@@ -26,6 +40,7 @@ function detach(ws) {
     }
   }
   ws.sessionId = ws.role = ws.peerId = null;
+  ws.iceConfig = null;
 }
 function relay(ws, message) {
   const session = sessions.get(ws.sessionId); if (!session) return;
@@ -50,7 +65,8 @@ wss.on('connection', ws => {
       if (!session) { session = { ownerToken: m.ownerToken, host: null, viewers: new Map() }; sessions.set(m.sessionId, session); }
       if (session.host && session.host !== ws) send(session.host, { type: 'session-replaced' });
       session.host = ws; ws.sessionId = m.sessionId; ws.role = 'host';
-      send(ws, { type: 'session-hosted', sessionId: m.sessionId, viewers: [...session.viewers.keys()] });
+      const iceConfig = pushIceServers(ws, true);
+      send(ws, { type: 'session-hosted', sessionId: m.sessionId, viewers: [...session.viewers.keys()], ...iceConfig });
       for (const [peerId, viewer] of session.viewers) { send(ws, { type: 'viewer-ready', peerId }); send(viewer, { type: 'host-ready', peerId }); }
       return;
     }
@@ -60,15 +76,16 @@ wss.on('connection', ws => {
       const session = sessions.get(m.sessionId); if (!session) return send(ws, { type: 'error', message: 'Session does not exist' });
       const peerId = crypto.randomBytes(6).toString('hex');
       session.viewers.set(peerId, ws); ws.sessionId = m.sessionId; ws.role = 'viewer'; ws.peerId = peerId;
-      send(ws, { type: 'session-joined', peerId, hostOnline: Boolean(session.host) });
+      const iceConfig = pushIceServers(ws, true);
+      send(ws, { type: 'session-joined', peerId, hostOnline: Boolean(session.host), ...iceConfig });
       if (session.host) { send(session.host, { type: 'viewer-ready', peerId }); send(ws, { type: 'host-ready', peerId }); }
       return;
     }
     if (m.type === 'close-session') {
       const session = sessions.get(m.sessionId);
       if (!session || ws.role !== 'host' || session.host !== ws || session.ownerToken !== m.ownerToken) return send(ws, { type: 'error', message: 'Only the broadcaster can close this session' });
-      for (const viewer of session.viewers.values()) { send(viewer, { type: 'session-closed' }); viewer.sessionId = viewer.role = viewer.peerId = null; }
-      send(ws, { type: 'session-closed' }); ws.sessionId = ws.role = null; sessions.delete(m.sessionId); return;
+      for (const viewer of session.viewers.values()) { send(viewer, { type: 'session-closed' }); viewer.sessionId = viewer.role = viewer.peerId = null; viewer.iceConfig = null; }
+      send(ws, { type: 'session-closed' }); ws.sessionId = ws.role = null; ws.iceConfig = null; sessions.delete(m.sessionId); return;
     }
     if (['offer','answer','ice','network-mode','recovery-ack','talkback-offer','talkback-answer','talkback-ice'].includes(m.type) && ws.sessionId) relay(ws, m);
   });
@@ -77,6 +94,7 @@ wss.on('connection', ws => {
 const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
     if (!ws.isAlive) { ws.terminate(); continue; }
+    if (ws.sessionId && ws.role && shouldRefreshIceConfig(ws.iceConfig, turnConfig)) pushIceServers(ws, true);
     ws.isAlive = false; ws.ping();
   }
 }, 30000);
@@ -89,4 +107,4 @@ function shutdown(signal) {
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
-server.listen(port, host, () => console.log(`Relay signaling listening on ${host}:${port}`));
+server.listen(port, host, () => console.log(`Relay signaling listening on ${host}:${port} (TURN ${turnConfig.configured ? 'configured' : 'not configured'})`));

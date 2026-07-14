@@ -1,0 +1,52 @@
+# Relay coturn configuration for an EC2 instance with one Elastic IP.
+# Render the three __...__ placeholders before installing as
+# /etc/turnserver.conf. Never commit the rendered file: it contains the
+# shared authentication secret.
+
+listening-port=3478
+tls-listening-port=5349
+listening-ip=__PRIVATE_IPV4__
+relay-ip=__PRIVATE_IPV4__
+external-ip=__PUBLIC_IPV4__/__PRIVATE_IPV4__
+
+# Keep this range identical to the EC2 security-group UDP relay range.
+min-port=49152
+max-port=49251
+
+realm=turn.asynchronous-inc.org
+server-name=turn.asynchronous-inc.org
+fingerprint
+use-auth-secret
+static-auth-secret=__TURN_SHARED_SECRET__
+stale-nonce
+
+cert=/etc/turnserver/certs/fullchain.pem
+pkey=/etc/turnserver/certs/privkey.pem
+no-tlsv1
+no-tlsv1_1
+
+# WebRTC uses UDP relay endpoints even when its client-to-TURN connection is
+# TCP/TLS. Disable DTLS and RFC 6062 TCP peer relays, neither of which this app
+# advertises, while retaining UDP 3478, TCP 3478 and TLS/TCP 5349 listeners.
+no-dtls
+no-tcp-relay
+
+# Do not let temporary TURN credentials become a path into the EC2 VPC or
+# instance-metadata/link-local services.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+no-multicast-peers
+
+# A broadcaster can have multiple bundled WebRTC connections under one
+# short-lived username, so keep the per-user quota above the viewer count.
+user-quota=64
+total-quota=512
+
+no-cli
+no-software-attribute
+syslog
