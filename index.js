@@ -39,7 +39,7 @@ function detach(ws) {
       send(session.host, { type: 'viewer-left', peerId: ws.peerId });
     }
   }
-  ws.sessionId = ws.role = ws.peerId = null;
+  ws.sessionId = ws.role = ws.peerId = ws.viewerToken = null;
   ws.iceConfig = null;
 }
 function relay(ws, message) {
@@ -57,12 +57,14 @@ wss.on('connection', ws => {
   ws.on('pong', () => { ws.isAlive = true; });
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return send(ws, { type: 'error', message: 'Invalid message' }); }
+    if (m.type === 'ping') { send(ws, { type: 'pong', at: m.at }); return; }
     if (m.type === 'host-session') {
       detach(ws);
       if (!validId(m.sessionId) || !m.ownerToken) return send(ws, { type: 'error', message: 'Invalid device ID or owner token' });
       let session = sessions.get(m.sessionId);
-      if (session && session.ownerToken !== m.ownerToken) return send(ws, { type: 'error', message: 'Device ID belongs to another broadcaster' });
+      if (session && session.ownerToken && session.ownerToken !== m.ownerToken) return send(ws, { type: 'error', message: 'Device ID belongs to another broadcaster' });
       if (!session) { session = { ownerToken: m.ownerToken, host: null, viewers: new Map() }; sessions.set(m.sessionId, session); }
+      session.ownerToken ||= m.ownerToken;
       if (session.host && session.host !== ws) send(session.host, { type: 'session-replaced' });
       session.host = ws; ws.sessionId = m.sessionId; ws.role = 'host';
       const iceConfig = pushIceServers(ws, true);
@@ -73,9 +75,16 @@ wss.on('connection', ws => {
     if (m.type === 'join-session') {
       detach(ws);
       if (!validId(m.sessionId)) return send(ws, { type: 'error', message: 'Enter a nine-digit session ID' });
-      const session = sessions.get(m.sessionId); if (!session) return send(ws, { type: 'error', message: 'Session does not exist' });
-      const peerId = crypto.randomBytes(6).toString('hex');
-      session.viewers.set(peerId, ws); ws.sessionId = m.sessionId; ws.role = 'viewer'; ws.peerId = peerId;
+      let session = sessions.get(m.sessionId);
+      if (!session) { session = { ownerToken: null, host: null, viewers: new Map() }; sessions.set(m.sessionId, session); }
+      const viewerToken = typeof m.viewerToken === 'string' && m.viewerToken.length >= 16 ? m.viewerToken.slice(0, 128) : null;
+      const existing = viewerToken ? [...session.viewers].find(([, viewer]) => viewer.viewerToken === viewerToken) : null;
+      const peerId = existing?.[0] || crypto.randomBytes(6).toString('hex');
+      if (existing?.[1] && existing[1] !== ws) {
+        const previous = existing[1];previous.sessionId = previous.role = previous.peerId = previous.viewerToken = null;previous.iceConfig = null;
+        send(previous, { type: 'session-replaced' });try { previous.close(4001, 'Viewer reconnected'); } catch {}
+      }
+      session.viewers.set(peerId, ws); ws.sessionId = m.sessionId; ws.role = 'viewer'; ws.peerId = peerId; ws.viewerToken = viewerToken;
       const iceConfig = pushIceServers(ws, true);
       send(ws, { type: 'session-joined', peerId, hostOnline: Boolean(session.host), ...iceConfig });
       if (session.host) { send(session.host, { type: 'viewer-ready', peerId }); send(ws, { type: 'host-ready', peerId }); }
@@ -84,8 +93,9 @@ wss.on('connection', ws => {
     if (m.type === 'close-session') {
       const session = sessions.get(m.sessionId);
       if (!session || ws.role !== 'host' || session.host !== ws || session.ownerToken !== m.ownerToken) return send(ws, { type: 'error', message: 'Only the broadcaster can close this session' });
-      for (const viewer of session.viewers.values()) { send(viewer, { type: 'session-closed' }); viewer.sessionId = viewer.role = viewer.peerId = null; viewer.iceConfig = null; }
-      send(ws, { type: 'session-closed' }); ws.sessionId = ws.role = null; ws.iceConfig = null; sessions.delete(m.sessionId); return;
+      session.host = null;
+      for (const viewer of session.viewers.values()) send(viewer, { type: 'host-offline' });
+      send(ws, { type: 'session-closed' }); ws.sessionId = ws.role = null; ws.iceConfig = null; return;
     }
     if (['offer','answer','ice','network-mode','recovery-ack','talkback-offer','talkback-answer','talkback-ice'].includes(m.type) && ws.sessionId) relay(ws, m);
   });
